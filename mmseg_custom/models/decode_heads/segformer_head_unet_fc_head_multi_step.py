@@ -13,6 +13,7 @@ from mmseg.utils import get_root_logger
 
 from .unet import UnetTimeEmbedding
 from .diffusion import q_pred, alpha_schedule_torch, cos_alpha_schedule_torch, q_posterior
+from ..utils.pretrained_checkpoint import load_validated_submodule
 
 
 NOISE_SCHEDULES = {
@@ -48,9 +49,14 @@ class SegformerHeadUnetFCHeadMultiStep(BaseDecodeHead):
                  inference_mode='q_pred',
                  interpolate_mode='bilinear',
                  pretrained=None,
+                 strict_pretrained=False,
+                 train_mask_embedding=False,
                  **kwargs):
         super().__init__(input_transform='multiple_select', **kwargs)
         self.pretrained = pretrained
+        self.strict_pretrained = strict_pretrained
+        self.train_mask_embedding = train_mask_embedding
+        self.pretrained_load_report = None
         if isinstance(pretrained, str):
             warnings.warn('DeprecationWarning: pretrained is a deprecated, '
                           'please use "init_cfg" instead')
@@ -120,15 +126,37 @@ class SegformerHeadUnetFCHeadMultiStep(BaseDecodeHead):
     def init_weights(self):
         pretrained = self.pretrained
         if isinstance(pretrained, str):
-            logger = get_root_logger()
-            load_checkpoint(self, pretrained, strict=False, logger=logger,
-                            revise_keys=[(r'^module\.', ''), (r'^decode_head\.', '')])
+            if self.strict_pretrained:
+                load_validated_submodule(
+                    self,
+                    pretrained,
+                    checkpoint_prefix='decode_head',
+                    description='SegFormer first-prediction head',
+                    required_target_prefixes=('convs.', 'fusion_conv.'),
+                    allowed_missing_target_prefixes=(
+                        'unet.', 'conv_seg_new.', 'embed.', 'log_'),
+                    allowed_unused_source_prefixes=('conv_seg.',),
+                    fail_on_unexpected=True)
+            else:
+                logger = get_root_logger()
+                load_checkpoint(
+                    self,
+                    pretrained,
+                    strict=False,
+                    logger=logger,
+                    revise_keys=[
+                        (r'^module\.', ''), (r'^decode_head\.', '')
+                    ])
 
     def _set_trainable_parameters(self):
         logger = get_root_logger()
         trainable_parameters = []
         for name, param in self.named_parameters():
-            if name.startswith('unet') or name.startswith('conv_seg_new'):
+            trainable = (
+                name.startswith('unet')
+                or name.startswith('conv_seg_new')
+                or (self.train_mask_embedding and name.startswith('embed')))
+            if trainable:
                 param.requires_grad = True
                 trainable_parameters.append(name)
             else:

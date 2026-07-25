@@ -13,7 +13,7 @@ from mmcv.runner import (HOOKS, DistSamplerSeedHook, EpochBasedRunner,
 from mmcv.utils import build_from_cfg
 
 from mmseg import digit_version
-from mmseg.core import build_optimizer
+from mmseg.core import DistEvalHook, EvalHook, build_optimizer
 from mmseg_custom.core import DistEvalHookMultiSteps, EvalHookMultiSteps
 from mmseg_custom.core.hook.ema import BaseEMAHook
 from mmseg.datasets import build_dataloader, build_dataset
@@ -205,7 +205,15 @@ def train_segmentor_multi_steps(model,
         val_dataloader = build_dataloader(val_dataset, **val_loader_cfg)
         eval_cfg = cfg.get('evaluation', {})
         eval_cfg['by_epoch'] = cfg.runner['type'] != 'IterBasedRunner'
-        eval_hook = DistEvalHookMultiSteps if distributed else EvalHookMultiSteps
+        unwrapped_model = model.module if hasattr(model, 'module') else model
+        if hasattr(unwrapped_model, 'collect_timesteps'):
+            eval_hook = (
+                DistEvalHookMultiSteps if distributed
+                else EvalHookMultiSteps)
+        else:
+            # Reuse this AMP/runtime-audited MMCV training path for ordinary
+            # EncoderDecoder Stage-1 training without duplicating a loop.
+            eval_hook = DistEvalHook if distributed else EvalHook
         # In this PR (https://github.com/open-mmlab/mmcv/pull/1193), the
         # priority of IterTimerHook has been modified from 'NORMAL' to 'LOW'.
         runner.register_hook(

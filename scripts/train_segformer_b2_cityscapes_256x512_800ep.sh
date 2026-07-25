@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CUDA_VISIBLE_DEVICES=1
 unset PYTORCH_CUDA_ALLOC_CONF
+export CUDA_VISIBLE_DEVICES=1
 
 REPO_DIR="/home/igarashi_25/DDPS"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
-CONFIG="${REPO_DIR}/configs/cityscapes/ddps_cityscapes_256x512_800ep.py"
-WORK_DIR="/home/igarashi_25/playground_2/DSDFM/DDPS/result/cityscapes_256x512_800ep_b4"
+CONFIG="${REPO_DIR}/configs/cityscapes/segformer_b2_cityscapes_256x512_800ep_pretrain.py"
+WORK_DIR="/home/igarashi_25/playground_2/DSDFM/DDPS/result/segformer_b2_pretrain_256x512_800ep"
 
 args=("${CONFIG}" "--work-dir" "${WORK_DIR}")
 if [[ "${1:-}" == "--resume" || "${1:-}" == "--resume-from" ]]; then
@@ -18,4 +18,4 @@ fi
 [[ $# -eq 0 ]] || { echo "Unknown arguments: $*" >&2; exit 2; }
 
 cd "${REPO_DIR}"
-exec .venv/bin/python tools/train_diffusion.py "${args[@]}" --auto-resume
+exec .venv/bin/python tools/train_segformer_pretrain.py "${args[@]}" --auto-resume

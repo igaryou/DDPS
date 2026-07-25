@@ -1,4 +1,5 @@
 from .assigner import MaskHungarianAssigner
+from .pretrained_checkpoint import load_validated_submodule
 from .point_sample import get_uncertain_point_coords_with_randomness
 from .positional_encoding import (LearnedPositionalEncoding,
                                   SinePositionalEncoding)
