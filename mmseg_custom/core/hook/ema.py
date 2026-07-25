@@ -50,11 +50,10 @@ class BaseEMAHook(Hook):
         self.momentum_fun = momentum_fun
 
     
-    def before_run(self, runner):
-        """To resume model with it's ema parameters more friendly.
-
-        Register ema parameter as ``named_buffer`` to model.
-        """
+    def register_ema_buffers(self, runner):
+        """Register EMA buffers once, before a checkpoint is restored."""
+        if hasattr(self, 'param_ema_buffer'):
+            return
         model = runner.model
         if is_module_wrapper(model):
             model = model.module
@@ -69,6 +68,10 @@ class BaseEMAHook(Hook):
             self.param_ema_buffer[name] = buffer_name
             model.register_buffer(buffer_name, value.data.clone())
         self.model_buffers = dict(model.named_buffers())
+
+    def before_run(self, runner):
+        """Register EMA buffers and optionally restore an EMA checkpoint."""
+        self.register_ema_buffers(runner)
         if self.auto_resume:
             self.checkpoint = find_latest_checkpoint(runner.work_dir)
         if self.checkpoint is not None:

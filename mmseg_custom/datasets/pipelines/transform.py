@@ -2,6 +2,49 @@ import mmcv
 import numpy as np
 import torch
 from mmseg.datasets.builder import PIPELINES
+from PIL import Image
+from torchvision.transforms import ColorJitter
+
+
+@PIPELINES.register_module()
+class TorchvisionColorJitter(object):
+    """Apply torchvision ``ColorJitter`` to an MMCV BGR uint8 image.
+
+    ``LoadImageFromFile`` in MMSegmentation 0.30 loads BGR images in the
+    0--255 range.  Torchvision expects RGB, so this transform converts BGR to
+    RGB for the jitter and converts the result back to BGR.  The following
+    ``Normalize(to_rgb=True)`` step then performs the usual BGR-to-RGB
+    conversion exactly once.  Segmentation fields are deliberately untouched.
+    """
+
+    def __init__(self,
+                 brightness=0.2,
+                 contrast=0.2,
+                 saturation=0.2,
+                 hue=0.1):
+        self.brightness = brightness
+        self.contrast = contrast
+        self.saturation = saturation
+        self.hue = hue
+        self.transform = ColorJitter(
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation,
+            hue=hue)
+
+    def __call__(self, results):
+        img = results['img']
+        if img.dtype != np.uint8:
+            img = np.clip(img, 0, 255).astype(np.uint8)
+        rgb = np.ascontiguousarray(img[..., ::-1])
+        jittered_rgb = np.asarray(self.transform(Image.fromarray(rgb)))
+        results['img'] = np.ascontiguousarray(jittered_rgb[..., ::-1])
+        return results
+
+    def __repr__(self):
+        return (f'{self.__class__.__name__}('
+                f'brightness={self.brightness}, contrast={self.contrast}, '
+                f'saturation={self.saturation}, hue={self.hue})')
 
 
 @PIPELINES.register_module()

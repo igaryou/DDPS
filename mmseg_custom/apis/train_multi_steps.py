@@ -8,12 +8,14 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from mmcv.runner import (HOOKS, DistSamplerSeedHook, EpochBasedRunner,
-                         build_runner, get_dist_info)
+                         Fp16OptimizerHook, OptimizerHook, build_runner,
+                         get_dist_info)
 from mmcv.utils import build_from_cfg
 
 from mmseg import digit_version
 from mmseg.core import build_optimizer
 from mmseg_custom.core import DistEvalHookMultiSteps, EvalHookMultiSteps
+from mmseg_custom.core.hook.ema import BaseEMAHook
 from mmseg.datasets import build_dataloader, build_dataset
 from mmseg.utils import (build_ddp, build_dp, find_latest_checkpoint,
                          get_root_logger)
@@ -100,6 +102,32 @@ def train_segmentor_multi_steps(model,
     # The specific dataloader settings
     train_loader_cfg = {**loader_cfg, **cfg.data.get('train_dataloader', {})}
     data_loaders = [build_dataloader(ds, **train_loader_cfg) for ds in dataset]
+    for index, (train_dataset, data_loader) in enumerate(
+            zip(dataset, data_loaders)):
+        logger.info(
+            'Train loader %d: dataset_size=%d, batch_size=%s, '
+            'len(dataloader)=%d, drop_last=%s', index,
+            len(train_dataset), data_loader.batch_size, len(data_loader),
+            data_loader.drop_last)
+        if cfg.runner['type'] == 'IterBasedRunner':
+            logger.info(
+                'Iteration-to-epoch audit: max_iters=%d / '
+                'len(dataloader)=%d = %.6f epochs',
+                cfg.runner['max_iters'], len(data_loader),
+                cfg.runner['max_iters'] / len(data_loader))
+        expected_size = cfg.get('expected_train_size', None)
+        if index == 0 and expected_size is not None:
+            if len(train_dataset) != expected_size:
+                raise RuntimeError(
+                    f'Train dataset changed: expected {expected_size}, '
+                    f'constructed {len(train_dataset)}')
+        target_epochs = cfg.get('target_epochs', None)
+        if index == 0 and target_epochs is not None:
+            expected_iters = target_epochs * len(data_loader)
+            if cfg.runner['max_iters'] != expected_iters:
+                raise RuntimeError(
+                    f'max_iters={cfg.runner["max_iters"]} is not '
+                    f'{target_epochs} * {len(data_loader)}={expected_iters}')
 
     # put model on devices
     if distributed:
@@ -137,8 +165,21 @@ def train_segmentor_multi_steps(model,
             logger=logger,
             meta=meta))
 
+    # Match MMSeg/MMDetection's MMCV 1.x AMP setup.  The original DDPS fork
+    # passed the raw optimizer dict and therefore silently ignored ``fp16``.
+    # MMCV's fp16 decorators cast inputs to half even on CPU in this legacy
+    # stack; only enable the configured AMP hook when CUDA is actually usable.
+    fp16_cfg = cfg.get('fp16', None) if torch.cuda.is_available() else None
+    if fp16_cfg is not None:
+        optimizer_config = Fp16OptimizerHook(
+            **cfg.optimizer_config, **fp16_cfg, distributed=distributed)
+    elif distributed and 'type' not in cfg.optimizer_config:
+        optimizer_config = OptimizerHook(**cfg.optimizer_config)
+    else:
+        optimizer_config = cfg.optimizer_config
+
     # register hooks
-    runner.register_training_hooks(cfg.lr_config, cfg.optimizer_config,
+    runner.register_training_hooks(cfg.lr_config, optimizer_config,
                                    cfg.checkpoint_config, cfg.log_config,
                                    cfg.get('momentum_config', None))
     if distributed:
@@ -188,8 +229,34 @@ def train_segmentor_multi_steps(model,
         resume_from = find_latest_checkpoint(cfg.work_dir)
         if resume_from is not None:
             cfg.resume_from = resume_from
-    if cfg.resume_from:
-        runner.resume(cfg.resume_from)
+    ema_hooks = [hook for hook in runner.hooks
+                 if isinstance(hook, BaseEMAHook)]
+    if cfg.resume_from and ema_hooks:
+        # EMA buffers must exist before loading their checkpoint values.  Load
+        # here (rather than inside EMA.before_run) so Fp16OptimizerHook can
+        # restore GradScaler from runner.meta during its own before_run.
+        for hook in ema_hooks:
+            hook.register_ema_buffers(runner)
+            hook.checkpoint = None
+            hook.auto_resume = False
+        runner.logger.info('EMA buffers registered before resume: %s',
+                           cfg.resume_from)
+        runner.resume(cfg.resume_from,
+                      map_location='default' if torch.cuda.is_available()
+                      else 'cpu')
+        # IterBasedRunner writes ``meta.iter`` before incrementing its loop
+        # counter, while the checkpoint filename denotes the next iteration.
+        # Advance once so a resumed run does not replay the saved batch.
+        runner._iter += 1
+        runner._inner_iter += 1
+        runner.logger.info('Adjusted resume iteration to %d', runner.iter)
+    elif cfg.resume_from:
+        runner.resume(cfg.resume_from,
+                      map_location='default' if torch.cuda.is_available()
+                      else 'cpu')
+        runner._iter += 1
+        runner._inner_iter += 1
+        runner.logger.info('Adjusted resume iteration to %d', runner.iter)
     elif cfg.load_from:
         runner.load_checkpoint(cfg.load_from)
     runner.run(data_loaders, cfg.workflow)

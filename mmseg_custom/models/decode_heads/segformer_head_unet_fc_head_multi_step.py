@@ -139,6 +139,30 @@ class SegformerHeadUnetFCHeadMultiStep(BaseDecodeHead):
         t = torch.randint(0, self.diffusion_timesteps, [batch_size], device=self.device)
         return t
 
+    def _labels_for_diffusion(self, labels):
+        """Replace ignored pixels only in the categorical diffusion input.
+
+        Cityscapes' standard ignore index is 255, which cannot be one-hot
+        encoded with 19 classes.  The original DDPS Cityscapes20 adapter turns
+        ignored pixels into a twentieth background class.  For standard
+        19-class training, use random valid categories at ignored locations in
+        this temporary tensor; the unchanged target still uses ignore_index in
+        the segmentation loss and evaluation.
+        """
+        ignored = labels == self.ignore_index
+        unexpected = ((labels < 0) | (labels >= self.num_classes)) & ~ignored
+        if unexpected.any():
+            values = torch.unique(labels[unexpected]).detach().cpu().tolist()
+            raise ValueError(f'Unexpected semantic labels: {values}')
+        if ignored.any():
+            labels = labels.clone()
+            labels[ignored] = torch.randint(
+                0,
+                self.num_classes,
+                size=(int(ignored.sum().item()),),
+                device=labels.device)
+        return labels
+
     def get_timesteps(self):
         num_inference_steps = min(self.diffusion_timesteps, self.inference_timesteps)
         timesteps = list(range(
@@ -244,6 +268,7 @@ class SegformerHeadUnetFCHeadMultiStep(BaseDecodeHead):
             x_interpolate = F.interpolate(content.float(), [H, W], mode='nearest').long().squeeze(1)  # [B, H, W]
             if B_multi_step is not None:
                 x_interpolate[multi_step, ...] = out_select
+            x_interpolate = self._labels_for_diffusion(x_interpolate)
             noise_step = self.diffusion_timesteps - t - 1  # t=0 means add 19 steps noise
             mask = q_pred(x_interpolate, noise_step.long(), self.diffusion_timesteps, self.num_classes,
                           self.log_cumprod_at, self.log_cumprod_bt)
@@ -280,6 +305,7 @@ class SegformerHeadUnetFCHeadMultiStep(BaseDecodeHead):
 
         B, C, H, W = out.shape
         x_interpolate = F.interpolate(content.float(), [H, W], mode='nearest').long().squeeze(1)  # [B, H, W]
+        x_interpolate = self._labels_for_diffusion(x_interpolate)
         t = (torch.ones([B], device=self.device) * timestep).long()
         noise_step = (self.diffusion_timesteps - t - 1).long()
         mask = q_pred(x_interpolate, noise_step, self.diffusion_timesteps, self.num_classes,

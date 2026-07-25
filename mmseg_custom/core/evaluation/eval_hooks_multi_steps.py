@@ -3,9 +3,39 @@ import os.path as osp
 import warnings
 
 import torch.distributed as dist
+import numpy as np
+from mmcv.parallel import is_module_wrapper
 from mmcv.runner import DistEvalHook as _DistEvalHook
 from mmseg.core.evaluation import EvalHook, DistEvalHook
 from torch.nn.modules.batchnorm import _BatchNorm
+
+
+def _get_final_key_score(key_score):
+    """Normalize a multi-step score and select its final timestep safely."""
+    if isinstance(key_score, (list, tuple)):
+        if len(key_score) == 0:
+            raise ValueError('Empty multi-step score received for best checkpoint.')
+        return float(key_score[-1])
+    if hasattr(key_score, 'shape'):
+        size = key_score.numel() if callable(getattr(key_score, 'numel', None)) \
+            else key_score.size
+        if size == 0:
+            raise ValueError('Empty multi-step score received for best checkpoint.')
+        if hasattr(key_score, 'detach'):
+            key_score = key_score.detach().cpu().numpy()
+        return float(np.asarray(key_score).reshape(-1)[-1])
+    return float(key_score)
+
+
+def _model_for_eval(runner):
+    return runner.model.module if is_module_wrapper(runner.model) else runner.model
+
+
+def _collect_timesteps(runner):
+    model = _model_for_eval(runner)
+    if hasattr(model, 'collect_timesteps'):
+        return model.collect_timesteps
+    return model.decode_head.collect_timesteps
 
 
 class EvalHookMultiSteps(EvalHook):
@@ -17,7 +47,7 @@ class EvalHookMultiSteps(EvalHook):
             results (list): Output results.
         """
         eval_res = self.dataloader.dataset.evaluate_diffusion(
-            results, collect_timesteps=runner.model.module.collect_timesteps, 
+            results, collect_timesteps=_collect_timesteps(runner),
             logger=runner.logger, **self.eval_kwargs)
 
         for name, val in eval_res.items():
@@ -38,7 +68,12 @@ class EvalHookMultiSteps(EvalHook):
             if self.key_indicator == 'auto':
                 # infer from eval_results
                 self._init_rule(self.rule, list(eval_res.keys())[0])
-            return eval_res[self.key_indicator]
+            score = eval_res[self.key_indicator]
+            runner.logger.info(
+                'Best-checkpoint criterion: metric=%s diffusion_timestep=%s score=%.6f',
+                self.key_indicator, _collect_timesteps(runner)[-1],
+                _get_final_key_score(score))
+            return score
 
         return None
 
@@ -64,7 +99,7 @@ class EvalHookMultiSteps(EvalHook):
         related information (best score, best checkpoint path) and save the
         best checkpoint into ``work_dir``.
         """
-        key_score = key_score[-1]
+        key_score = _get_final_key_score(key_score)
         if self.by_epoch:
             current = f'epoch_{runner.epoch + 1}'
             cur_type, cur_time = 'epoch', runner.epoch + 1
@@ -109,7 +144,7 @@ class DistEvalHookMultiSteps(DistEvalHook):
             results (list): Output results.
         """
         eval_res = self.dataloader.dataset.evaluate_diffusion(
-            results, collect_timesteps=runner.model.module.collect_timesteps, 
+            results, collect_timesteps=_collect_timesteps(runner),
             logger=runner.logger, **self.eval_kwargs)
 
         for name, val in eval_res.items():
@@ -130,7 +165,12 @@ class DistEvalHookMultiSteps(DistEvalHook):
             if self.key_indicator == 'auto':
                 # infer from eval_results
                 self._init_rule(self.rule, list(eval_res.keys())[0])
-            return eval_res[self.key_indicator]
+            score = eval_res[self.key_indicator]
+            runner.logger.info(
+                'Best-checkpoint criterion: metric=%s diffusion_timestep=%s score=%.6f',
+                self.key_indicator, _collect_timesteps(runner)[-1],
+                _get_final_key_score(score))
+            return score
 
         return None
     
@@ -181,7 +221,7 @@ class DistEvalHookMultiSteps(DistEvalHook):
         related information (best score, best checkpoint path) and save the
         best checkpoint into ``work_dir``.
         """
-        key_score = key_score[-1]
+        key_score = _get_final_key_score(key_score)
         if self.by_epoch:
             current = f'epoch_{runner.epoch + 1}'
             cur_type, cur_time = 'epoch', runner.epoch + 1
