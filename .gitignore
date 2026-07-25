@@ -28,7 +28,7 @@ checkpoints/
 # Datasets
 data/
 datasets/
-cityscapes/
+/cityscapes/
 
 # IDE
 .vscode/
